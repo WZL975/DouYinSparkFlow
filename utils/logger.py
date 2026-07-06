@@ -13,8 +13,10 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d -
 LOG_FILE = "logs/app.log"
 
 
-def _normalize_level(level_str):
-    """Convert log level string to logging constant, case-insensitive."""
+def _normalize_level(level):
+    """Convert log level to logging constant. Accepts int or string (case-insensitive)."""
+    if isinstance(level, int):
+        return level
     level_map = {
         "debug": logging.DEBUG,
         "info": logging.INFO,
@@ -22,7 +24,7 @@ def _normalize_level(level_str):
         "error": logging.ERROR,
         "critical": logging.CRITICAL,
     }
-    return level_map.get(level_str.lower(), logging.INFO)
+    return level_map.get(level.lower(), logging.INFO)
 
 
 # 配置日志
