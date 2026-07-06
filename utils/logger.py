@@ -12,6 +12,19 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d -
 # 日志文件路径
 LOG_FILE = "logs/app.log"
 
+
+def _normalize_level(level_str):
+    """Convert log level string to logging constant, case-insensitive."""
+    level_map = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "error": logging.ERROR,
+        "critical": logging.CRITICAL,
+    }
+    return level_map.get(level_str.lower(), logging.INFO)
+
+
 # 配置日志
 def setup_logger(name="app", level="Info"):
     """
@@ -20,17 +33,8 @@ def setup_logger(name="app", level="Info"):
     :param level: 日志级别
     :return: 配置好的日志记录器
     """
-    if level == "Debug":
-        level = logging.DEBUG
-    elif level == "Info":
-        level = logging.INFO
-    elif level == "Warning":
-        level = logging.WARNING
-    elif level == "Error":
-        level = logging.ERROR
-    else:
-        level = logging.INFO
-    
+    level = _normalize_level(level)
+
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
