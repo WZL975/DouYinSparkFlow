@@ -130,7 +130,13 @@ def scroll_and_select_user(page, username, targets):
                     targetSymbol = targetName
 
                 if targetSymbol in targets:
-                    element.click()
+                    # [修复] 用文本重新定位点击，避免虚拟滚动导致缓存的 element 指向错误 DOM
+                    reclick_selector = f'xpath=//span[contains(@class, "item-header-name-")][normalize-space(text())="{targetName}"]/ancestor::div[contains(@class, "semi-list-item-body")]'
+                    try:
+                        page.locator(reclick_selector).first.click(timeout=5000)
+                    except Exception:
+                        # 兜底：用缓存 element
+                        element.click()
                     if matchMode == "short_id":
                         logger.debug(
                             f"账号 {username} 选中目标好友 {targetName} 准备开始交互"
@@ -246,8 +252,17 @@ def do_user_task(browser, username, cookies, targets):
 
         logger.debug(f"账号 {username} 开始发送消息")
         # 滚动并选择用户
-        for username in scroll_and_select_user(page, username, targets):
-            logger.debug(f"账号 {username} 已选中好友 {username} 发送消息")
+        for target_name in scroll_and_select_user(page, username, targets):
+            logger.debug(f"账号 {username} 已选中好友 {target_name} 发送消息")
+            # 验证：等待聊天窗口打开，检查顶部是否显示目标好友名
+            chat_header_selector = "xpath=//div[contains(@class, 'item-header-name-')]"
+            try:
+                page.wait_for_selector(chat_header_selector, timeout=5000)
+                actual_name = page.locator(chat_header_selector).inner_text()
+                if target_name not in actual_name:
+                    logger.warning(f"账号 {username} 聊天窗口显示 '{actual_name}'，期望 '{target_name}'，可能点错人，继续尝试发送")
+            except Exception:
+                logger.warning(f"账号 {username} 未找到聊天窗口顶部名称，继续尝试发送")
             # 等待聊天输入框元素加载完成，使用更稳定的属性选择器
             chat_input_selector = "xpath=//div[contains(@class, 'chat-input-')]"
             page.wait_for_selector(chat_input_selector, timeout=config["browserTimeout"])
@@ -262,9 +277,9 @@ def do_user_task(browser, username, cookies, targets):
                     chat_input.press("Shift+Enter")  # 模拟 Shift+Enter 插入换行
 
             logger.debug(
-                f"账号 {username} 准备发送消息给好友 {username}：\n\t{message}"
+                f"账号 {username} 准备发送消息给好友 {target_name}：\n\t{message}"
             )
-            logger.debug(f"账号 {username} 给好友 {username} 发送消息完成")
+            logger.debug(f"账号 {username} 给好友 {target_name} 发送消息完成")
             # 模拟按下回车键发送消息
             chat_input.press("Enter")
             time.sleep(2)  # 发送完等待一会儿
