@@ -64,15 +64,56 @@ def retry_operation(name, operation, retries=3, delay=2, *args, **kwargs):
                 raise
 
 
+def _try_selector(page, selectors, description, timeout=30000):
+    """
+    多级尝试选择器，返回成功匹配的 locator。主选失败→备选→兜底。
+    :param page: Playwright page 对象
+    :param selectors: 选择器列表（优先级从高到低）
+    :param description: 选择器用途描述（用于日志）
+    :param timeout: 每个 select 的超时时间
+    :return: 命中的 locator，或 None（全部失败）
+    """
+    for idx, sel in enumerate(selectors):
+        try:
+            loc = page.locator(sel).first
+            # 短等待看是否存在
+            loc.wait_for(state="attached", timeout=timeout)
+            logger.debug(f"选择器 '{description}' #{idx} 命中: {sel[:60]}...")
+            return loc
+        except Exception:
+            logger.debug(f"选择器 '{description}' #{idx} 未命中: {sel[:60]}...")
+            continue
+    logger.warning(f"选择器 '{description}' 全部失败")
+    return None
+
+
 def scroll_and_select_user(page, username, targets):
     """尝试滚动并查找用户名"""
-    # 定义目标元素和滚动容器的选择器
-    friends_tab_selector = 'xpath=//*[@id="sub-app"]/div/div/div[1]/div[2]'
-    target_selector = 'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]//div[contains(@class, "semi-list-item-body semi-list-item-body-flex-start")]'
-    scrollable_friends_selector = 'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/ul/div'
+    # 定义目标元素和滚动容器的选择器（多级，主选 + 备选 + 兜底）
+    friends_tab_selectors = [
+        'xpath=//*[@id="sub-app"]/div/div/div[1]/div[2]',  # 原路径
+        'xpath=//span[text()="好友"]/ancestor::div[contains(@class, "semi-tabs-tab")]',  # 文本匹配
+        'xpath=//div[contains(@class, "semi-tabs-tab")][contains(., "好友")]',
+        'xpath=//span[contains(text(), "好友")]',
+        'xpath=//div[text()="好友"]',
+    ]
+    
+    target_selector = 'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]//div[contains(@class, "semi-list-item-body")]'
+    target_selector_b = 'xpath=//div[contains(@class, "semi-list-item-body")]'
+    
+    scrollable_selectors = [
+        'xpath=//*[@id="sub-app"]/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/ul/div',  # 原路径
+        'xpath=//ul[contains(@class, "semi-virtual-list")]/..',
+        'xpath=//div[contains(@class, "semi-virtual-list")]/..',
+        'xpath=//div[contains(@class, "semi-list-item-body")]/ancestor::*[3]',
+    ]
+    
+    first_friend_selectors = [
+        'xpath=//*[@id="sub-app"]/div/div/div[2]/div[2]/div/div/div[1]/div/div/div/ul/div/div/div[1]/li/div',  # 原路径
+        'xpath=(//div[contains(@class, "semi-list-item-body")])[1]',
+    ]
     
     # [修复] 使用模糊匹配 no-more-tip- 前缀，不再依赖精确哈希后缀
-    # 同时增加文本匹配作为兜底
     no_more_selector = 'xpath=//div[contains(@class, "no-more-tip-")]'
     loading_selector = 'xpath=//div[contains(@class, "semi-spin")]'
 
@@ -81,15 +122,23 @@ def scroll_and_select_user(page, username, targets):
 
     logger.debug(f"账号 {username} 点击进入好友标签页")
     # 点击好友标签页
-    page.wait_for_selector(friends_tab_selector)
-    page.locator(friends_tab_selector).click()
+    tab_loc = _try_selector(page, friends_tab_selectors, "好友标签页")
+    if tab_loc is None:
+        # 全部失败：截图留存并抛异常
+        try:
+            page.screenshot(path="screenshot-friends-tab-fail.png", full_page=True)
+            logger.error("已截图保存至 screenshot-friends-tab-fail.png")
+        except Exception:
+            pass
+        raise Exception(f"账号 {username} 无法找到好友标签页，所有选择器均超时")
+    tab_loc.click()
 
     logger.debug(f"账号 {username} 进入好友列表页面")
 
     # 确保第一个好友元素加载完成
-    first_friend_selector = 'xpath=//*[@id="sub-app"]/div/div/div[2]/div[2]/div/div/div[1]/div/div/div/ul/div/div/div[1]/li/div'
-    page.wait_for_selector(first_friend_selector)
-    page.locator(first_friend_selector).click()  # 点击第一个好友，确保列表激活
+    first_loc = _try_selector(page, first_friend_selectors, "首个好友元素", timeout=15000)
+    if first_loc is not None:
+        first_loc.click()  # 点击第一个好友，确保列表激活
 
     logger.debug(f"账号 {username} 已激活好友列表，开始滚动查找目标好友")
 
@@ -104,8 +153,10 @@ def scroll_and_select_user(page, username, targets):
     MAX_EMPTY_SCROLLS = 10  # 连续10次滚动没有新好友，认为到底了
 
     while True:
-        # 查找所有目标元素
+        # 查找所有目标元素（备选兜底）
         target_elements = page.locator(target_selector).all()
+        if len(target_elements) == 0:
+            target_elements = page.locator(target_selector_b).all()
 
         # [修复] 记录本轮循环前已发现的好友数，用于判断是否有新发现
         prev_found_count = len(found_targets)
@@ -186,10 +237,15 @@ def scroll_and_select_user(page, username, targets):
                 time.sleep(1.5) # 给加载留点时间
                 # 不 break，继续去滚动以触发后续内容
 
-            # 4. 滚动容器
-            scrollable_element = page.locator(
-                scrollable_friends_selector
-            ).element_handle()
+            # 4. 滚动容器（多级尝试）
+            scrollable_element = None
+            for scroll_sel in scrollable_selectors:
+                try:
+                    scrollable_element = page.locator(scroll_sel).element_handle()
+                    if scrollable_element:
+                        break
+                except Exception:
+                    continue
             
             if scrollable_element:
                 # [修复] 记录滚动前的 scrollTop，用于检测是否真的滚动了
@@ -227,64 +283,73 @@ def do_user_task(browser, username, cookies, targets):
 
         page = context.new_page()
         
-        if matchMode == "short_id":  # 使用抖音号进行匹配
-            page.on("response", handle_response)
-        
-        # 打开抖音创作者中心
-        retry_operation(
-            "打开抖音创作者中心",
-            page.goto,
-            retries=config["taskRetryTimes"],
-            delay=5,
-            url="https://creator.douyin.com/",
-        )
-        # 注入 Cookie
-        context.add_cookies(cookies)
-
-        # 导航到消息页面
-        retry_operation(
-            "导航到消息页面",
-            page.goto,
-            retries=config["taskRetryTimes"],
-            delay=5,
-            url="https://creator.douyin.com/creator-micro/data/following/chat",
-        )
-
-        logger.debug(f"账号 {username} 开始发送消息")
-        # 滚动并选择用户
-        for target_name in scroll_and_select_user(page, username, targets):
-            logger.debug(f"账号 {username} 已选中好友 {target_name} 发送消息")
-            # 验证：等待聊天窗口打开，检查顶部是否显示目标好友名
-            chat_header_selector = "xpath=//div[contains(@class, 'item-header-name-')]"
-            try:
-                page.wait_for_selector(chat_header_selector, timeout=5000)
-                actual_name = page.locator(chat_header_selector).inner_text()
-                if target_name not in actual_name:
-                    logger.warning(f"账号 {username} 聊天窗口显示 '{actual_name}'，期望 '{target_name}'，可能点错人，继续尝试发送")
-            except Exception:
-                logger.warning(f"账号 {username} 未找到聊天窗口顶部名称，继续尝试发送")
-            # 等待聊天输入框元素加载完成，使用更稳定的属性选择器
-            chat_input_selector = "xpath=//div[contains(@class, 'chat-input-')]"
-            page.wait_for_selector(chat_input_selector, timeout=config["browserTimeout"])
-            chat_input = page.locator(chat_input_selector)
-
-            # 在 chat-input-dccKiL 中输入内容
-            message = build_message()
-            for line in message.split("\\n"):
-                chat_input.type(line)  # 输入每一行
-                # 如果不是最后一行，模拟 Shift+Enter 插入换行
-                if line != message.split("\\n")[-1]:
-                    chat_input.press("Shift+Enter")  # 模拟 Shift+Enter 插入换行
-
-            logger.debug(
-                f"账号 {username} 准备发送消息给好友 {target_name}：\n\t{message}"
+        try:
+            if matchMode == "short_id":  # 使用抖音号进行匹配
+                page.on("response", handle_response)
+            
+            # 打开抖音创作者中心
+            retry_operation(
+                "打开抖音创作者中心",
+                page.goto,
+                retries=config["taskRetryTimes"],
+                delay=5,
+                url="https://creator.douyin.com/",
             )
-            logger.debug(f"账号 {username} 给好友 {target_name} 发送消息完成")
-            # 模拟按下回车键发送消息
-            chat_input.press("Enter")
-            time.sleep(2)  # 发送完等待一会儿
+            # 注入 Cookie
+            context.add_cookies(cookies)
 
-        context.close()  # 任务完成后关闭上下文
+            # 导航到消息页面
+            retry_operation(
+                "导航到消息页面",
+                page.goto,
+                retries=config["taskRetryTimes"],
+                delay=5,
+                url="https://creator.douyin.com/creator-micro/data/following/chat",
+            )
+
+            logger.debug(f"账号 {username} 开始发送消息")
+            # 滚动并选择用户
+            for target_name in scroll_and_select_user(page, username, targets):
+                logger.debug(f"账号 {username} 已选中好友 {target_name} 发送消息")
+                # 验证：等待聊天窗口打开，检查顶部是否显示目标好友名
+                chat_header_selector = "xpath=//div[contains(@class, 'item-header-name-')]"
+                try:
+                    page.wait_for_selector(chat_header_selector, timeout=5000)
+                    actual_name = page.locator(chat_header_selector).inner_text()
+                    if target_name not in actual_name:
+                        logger.warning(f"账号 {username} 聊天窗口显示 '{actual_name}'，期望 '{target_name}'，可能点错人，继续尝试发送")
+                except Exception:
+                    logger.warning(f"账号 {username} 未找到聊天窗口顶部名称，继续尝试发送")
+                # 等待聊天输入框元素加载完成，使用更稳定的属性选择器
+                chat_input_selector = "xpath=//div[contains(@class, 'chat-input-')]"
+                page.wait_for_selector(chat_input_selector, timeout=config["browserTimeout"])
+                chat_input = page.locator(chat_input_selector)
+
+                # 在 chat-input-dccKiL 中输入内容
+                message = build_message()
+                for line in message.split("\\n"):
+                    chat_input.type(line)  # 输入每一行
+                    # 如果不是最后一行，模拟 Shift+Enter 插入换行
+                    if line != message.split("\\n")[-1]:
+                        chat_input.press("Shift+Enter")  # 模拟 Shift+Enter 插入换行
+
+                logger.debug(
+                    f"账号 {username} 准备发送消息给好友 {target_name}：\n\t{message}"
+                )
+                logger.debug(f"账号 {username} 给好友 {target_name} 发送消息完成")
+                # 模拟按下回车键发送消息
+                chat_input.press("Enter")
+                time.sleep(2)  # 发送完等待一会儿
+        except Exception as e:
+            # 截图留存方便排查
+            try:
+                page.screenshot(path=f"screenshot-{username}-fail.png", full_page=True)
+                logger.error(f"任务失败，已截图保存至 screenshot-{username}-fail.png")
+            except Exception:
+                pass
+            raise e
+        finally:
+            context.close()  # 任务完成后关闭上下文
 
 
 def runTasks():
